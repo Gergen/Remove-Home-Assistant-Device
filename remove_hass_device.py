@@ -3,9 +3,35 @@
 import json
 import codecs
 import sys
+from colorama  import init, Fore
+init(autoreset = True)
 
+from typing import List, Dict
+import argparse
 
-def list_without_indexes(original: list, id_list: list[str], index_by_id: dict[str, int]):
+parser = argparse.ArgumentParser(description="""Delete device and dependent items from config files. 
+             Ensure you copy 'core.entity_registry', 'core.device_registry' and 'core.config_entries'
+             to the folder where you are running this script.
+             """)
+parser.add_argument('--name', type=str, help="Name of device to delete.")
+parser.add_argument('--id', type=str, help=" Id of device to delete.")
+args = parser.parse_args()
+
+if args.name:
+    delete_by_name = args.name
+    print(Fore.GREEN + f"Deleting the device named \"{delete_by_name}\".")
+else:
+    delete_by_name = ""
+if args.id:
+    delete_by_id = args.id
+    print(Fore.GREEN + f"Deleting the device with id \"{delete_by_id}\" (any given name will be ignored).")
+else:
+    delete_by_id = ""
+if not( delete_by_name or delete_by_id ):
+    parser.print_help()
+    sys.exit(1)
+
+def list_without_indexes(original: List, id_list: List[str], index_by_id: Dict[str, int]):
     new = []
     i_set = set([index_by_id[id] for id in id_list])
     for i in range(len(original)):
@@ -14,12 +40,12 @@ def list_without_indexes(original: list, id_list: list[str], index_by_id: dict[s
     return new
 
 
-def from_json_file(file_name: str) -> dict:
+def from_json_file(file_name: str) -> Dict:
     with codecs.open(file_name, "r", "utf-8-sig") as file:
         return json.load(file)
 
 
-def to_json_file(file_name: str, data: dict):
+def to_json_file(file_name: str, data: Dict):
     with open(file_name, "w", encoding="utf-8") as outfile:
         json.dump(data, outfile, ensure_ascii=False, indent=4)
 
@@ -40,8 +66,42 @@ config_entry_index_by_entry_id = {config_entries[i]["entry_id"]: i for i in rang
 # - may have "config_entries" (a list of ids)
 # - may have "disabled_by": (null | "user"),
 device_index_by_id = {devices[i]["id"]: i for i in range(len(devices))}
-device_ids_by_name = {device["name"]: device["id"] for device in devices}
+print(f"Found {len(device_index_by_id)} devices by id.")
+
+# dict of device by id (populated when we build the device_ids_by_name dict)
+device_by_id = {}
+
+# device_ids_by_name = {device["name"]: device["id"] for device in devices}
+device_ids_by_name = {}
+duplicate_names = {} # only for names that occur more than once, dict of lists, key = device name, value = list of ids
+for device in devices:
+    name = device["name"]
+    id = device["id"]
+    device_by_id[ id ] = device
+    if name in device_ids_by_name:
+        existing_id = device_ids_by_name[ name ]
+        existing_device = device_by_id[ existing_id ] 
+        if name not in duplicate_names:
+            duplicate_names[ name ] = [ existing_device['id'] ]
+        duplicate_names[ name ].append( id)
+    device_ids_by_name[ name ] = id
+print(f"Found {len(device_ids_by_name)} devices by unique name.")
+
+
+if duplicate_names:
+    print(Fore.YELLOW + f"WARNING: You have multiple devices with the same name.")
+    print(Fore.YELLOW + f"{'name':>30} {'id':>40} {'connections'}")
+    for name, ids in duplicate_names.items():
+        for id in ids:
+            device = device_by_id[ id ]
+            print(Fore.YELLOW + f"{repr(name):>30} {device['id']:>40} {device['connections']}")
+
 device_ids_by_name_by_user = {device["name_by_user"]: device["id"] for device in devices if device["name_by_user"] is not None}
+print(f"Found {len(device_ids_by_name_by_user)} devices by name by user.")
+
+if delete_by_name and (delete_by_name in duplicate_names):
+    print(Fore.RED + f"ERROR: You asked for deletion by a name of a name that is not unique. That is not possible. Aborting.")
+    sys.exit(1)
 
 # index the devices by config id to see if there are any configs referenced by multiple devices
 device_ids_by_config_entry_id = {}
@@ -67,7 +127,7 @@ for device in devices:
 
 def get_device_id_list(device_id: str):
     # descend the tree recursively
-    def internal(device_id: str, to_list: list[str]):
+    def internal(device_id: str, to_list: List[str]):
         to_list.append(device_id)
         if device_id in device_ids_by_parent_id:
             for child_device_id in device_ids_by_parent_id[device_id]:
@@ -87,14 +147,17 @@ for i in range(len(entities)):
         entity_ids_by_device_id[device_id] = set()
     entity_ids_by_device_id[device_id].add(entity["id"])
 
-# get the id of the device we are looking for from its name
-input_name = sys.argv[1]
-print(f"Input: {input_name}")
+# search the device we want to delete
+
 target_device_id = None
-if input_name in device_ids_by_name:
-    target_device_id = device_ids_by_name[input_name]
-if (target_device_id is None) and (input_name in device_ids_by_name_by_user):
-    target_device_id = device_ids_by_name_by_user[input_name]
+if delete_by_id:
+    if delete_by_id in device_by_id:
+        target_device_id = delete_by_id
+else:
+    if delete_by_name in device_ids_by_name:
+        target_device_id = device_ids_by_name[delete_by_name]
+    if (target_device_id is None) and (delete_by_name in device_ids_by_name_by_user):
+       target_device_id = device_ids_by_name_by_user[delete_by_name]
 # if we identified a target device...
 if target_device_id is not None:
     # gather the full list of devices and dependencies to remove
@@ -121,7 +184,8 @@ if target_device_id is not None:
         if device_id in entity_ids_by_device_id:
             entity_id_list.extend(entity_ids_by_device_id[device_id])
     print("Entities to remove:")
-    print([entity_id + " - " + entities[entity_index_by_id[entity_id]]["name"] for entity_id in entity_id_list])
+    # note: some entities have no 'name' although they all do seem to have an 'original_name' 
+    print([entity_id + " - " + str(entities[entity_index_by_id[entity_id]]["original_name"]) for entity_id in entity_id_list])
 
     # now actually remove the elements
     devices = list_without_indexes(devices, device_id_list, device_index_by_id)
@@ -137,3 +201,8 @@ if target_device_id is not None:
     to_json_file("core.config_entries", core_config_entries)
     to_json_file("core.entity_registry", core_entity_registry)
     to_json_file("core.device_registry", core_device_registry)
+    print(Fore.GREEN + "DONE.")
+else:
+    print(Fore.RED + "ERROR: No such device. Nothing to delete.")
+    sys.exit(1)
+    
